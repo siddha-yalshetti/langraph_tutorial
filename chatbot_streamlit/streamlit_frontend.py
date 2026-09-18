@@ -1,6 +1,12 @@
 import streamlit as st
 from langchain_core.messages import HumanMessage
-from langgraph_backend import chatbot
+from langgraph_backend import (
+    chatbot,
+    create_thread,
+    get_thread_messages,
+    list_threads,
+    update_thread_title,
+)
 
 st.set_page_config(
     page_title="LangGraph Chatbot",
@@ -12,42 +18,68 @@ st.caption(
     "Chatbot powered by LangGraph + Groq"
 )
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+threads = list_threads()
+if not threads:
+    create_thread()
+    threads = list_threads()
 
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = "user_1"
+thread_ids = [thread["thread_id"] for thread in threads]
+if "active_chat_id" not in st.session_state or st.session_state.active_chat_id not in thread_ids:
+    st.session_state.active_chat_id = thread_ids[0]
+
+
+st.session_state.thread_id = st.session_state.active_chat_id
+
+
+def create_new_chat():
+    st.session_state.active_chat_id = create_thread()
+    st.session_state.thread_id = st.session_state.active_chat_id
+
+
+def select_chat(thread_id):
+    st.session_state.active_chat_id = thread_id
+    st.session_state.thread_id = thread_id
+
+
+st.session_state.thread_id = st.session_state.active_chat_id
+active_thread = next(
+    thread for thread in threads
+    if thread["thread_id"] == st.session_state.active_chat_id
+)
+active_messages = get_thread_messages(st.session_state.active_chat_id)
 
 with st.sidebar:
 
-    st.header("⚙️ Settings")
-
-    st.write(
-        "Thread ID:"
-    )
-
-    st.code(
-        st.session_state.thread_id
-    )
+    st.title("LangGraph Chatbot")
 
     if st.button(
-        "🗑️ Clear Chat",
-        use_container_width=True
+        "➕ Start Chat",
+        use_container_width=True,
+        type="primary"
     ):
-
-        st.session_state.messages = []
-
-        # Create new thread
-        st.session_state.thread_id = (
-            "user_"
-            + str(
-                id(st.session_state)
-            )
-        )
-
+        create_new_chat()
         st.rerun()
 
-for message in st.session_state.messages:
+    st.subheader("My Conversation")
+    st.caption("Current thread ID")
+    st.code(st.session_state.thread_id)
+
+    for thread in threads:
+        thread_id = thread["thread_id"]
+        button_type = "primary" if thread_id == st.session_state.active_chat_id else "secondary"
+        st.caption(thread["title"])
+        if st.button(
+            thread_id,
+            key=f"thread_{thread_id}",
+            use_container_width=True,
+            type=button_type
+        ):
+            select_chat(thread_id)
+            st.rerun()
+
+    st.caption("Conversations are saved while this app session is running.")
+
+for message in active_messages:
 
     with st.chat_message(
         message["role"]
@@ -70,33 +102,36 @@ if user_input:
 
 
     # Save user message
-    st.session_state.messages.append(
-        {
-            "role": "user",
-            "content": user_input
-        }
-    )
+    if active_thread["title"] == "New conversation":
+        title = user_input[:32]
+        if len(user_input) > 32:
+            title += "..."
+        update_thread_title(st.session_state.thread_id, title)
 
 
     # LangGraph thread configuration
-    config = {
-        "configurable": {
-            "thread_id":
-                st.session_state.thread_id
-        }
+    # config = {
+    #     "configurable": {
+    #                 "thread_id": st.session_state.thread_id
+    #     }
+    # }
+
+    config={
+        'configurable':{"thread_id":st.session_state["thread_id"]},
+        "metadata":{
+            "thread_id":st.session_state["thread_id"]
+        },
+        "run_name":"chat_turn",
     }
 
 
     # Generate response
     with st.chat_message("assistant"):
 
-        with st.spinner(
-            "Thinking..."
-        ):
+        try:
 
-            try:
-
-                response = chatbot.invoke(
+            def stream_response():
+                for message_chunk, _metadata in chatbot.stream(
                     {
                         "messages": [
                             HumanMessage(
@@ -104,33 +139,17 @@ if user_input:
                             )
                         ]
                     },
-                    config=config
-                )
+                    config=config,
+                    stream_mode="messages"
+                ):
+                    if message_chunk.content:
+                        yield message_chunk.content
 
+            # Render each token as it arrives.
+            ai_response = st.write_stream(stream_response())
 
-                # Get AI response
-                ai_response = (
-                    response["messages"][-1].content
-                )
+        except Exception as e:
 
-
-                # Display response
-                st.write(
-                    ai_response
-                )
-
-
-                # Save AI response
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": ai_response
-                    }
-                )
-
-
-            except Exception as e:
-
-                st.error(
-                    f"Error: {e}"
-                )
+            st.error(
+                f"Error: {e}"
+            )
